@@ -2,76 +2,61 @@ const { ipcMain } = require('electron');
 const { createClient } = require('@supabase/supabase-js');
 const { AccessToken } = require('livekit-server-sdk');
 
-const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
-const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash-lite';
-const OPENROUTER_MODEL = 'google/gemma-4-31b-it:free';
+const MISTRAL_KEY = 'dcxWdterV9OBvYyaHu4VSPfoFrahv9O1';
+const MISTRAL_LARGE = 'mistral-large-2411';
+const MISTRAL_MEDIUM = 'mistral-medium-2508';
+const MISTRAL_SMALL = 'mistral-small-2506';
 
-async function directGemini({ prompt, temperature = 0.4 }) {
-  const key = process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
-  if (!key) throw new Error('Gemini API key missing');
-  const request = async (modelName) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature },
-    }),
-  });
+async function directMistral({ prompt, temperature = 0.4, model = MISTRAL_LARGE }) {
+  console.log(`[Main AI] Calling Mistral: model=${model}, promptLen=${prompt?.length}`);
 
-  let res = await request(model);
-  if (!process.env.GEMINI_MODEL && res.status === 404) res = await request(FALLBACK_GEMINI_MODEL);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || 'Gemini request failed');
-  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
-  if (!text) throw new Error('Gemini returned no text');
-  return text;
-}
+  if (!prompt?.trim()) throw new Error('Prompt is empty');
 
-async function directOpenRouter({ prompt, temperature = 0.4 }) {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) throw new Error('OpenRouter API key missing');
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${key}`,
-      'HTTP-Referer': 'https://conductor.ryan',
-      'X-Title': 'Ryan Conductor',
+      'Authorization': `Bearer ${MISTRAL_KEY}`,
     },
     body: JSON.stringify({
-      model: OPENROUTER_MODEL,
+      model,
       messages: [{ role: 'user', content: prompt }],
       temperature,
     }),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || 'OpenRouter request failed');
+  console.log(`[Main AI] Mistral Response: status=${res.status}, model=${model}`);
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error(`[Main AI] Mistral Error (${model}):`, JSON.stringify(data));
+    throw new Error(data?.error?.message || `Mistral request failed for ${model}`);
+  }
+
   const text = data?.choices?.[0]?.message?.content?.trim();
-  if (!text) throw new Error('OpenRouter returned no text');
+  if (!text) {
+    console.warn(`[Main AI] Mistral (${model}) returned empty text. Full response:`, JSON.stringify(data));
+    throw new Error(`Mistral (${model}) returned no text`);
+  }
   return text;
 }
 
-async function callAi({ prompt, temperature = 0.4, provider: preferredProvider = null }) {
-  const providers = [];
-  if (preferredProvider === 'openrouter') {
-    providers.push(directOpenRouter, directGemini);
-  } else {
-    providers.push(directGemini, directOpenRouter);
-  }
-
+async function callAi({ prompt, temperature = 0.4 }) {
+  console.log(`[Main AI] callAi initiated with Mistral chain`);
+  const models = [MISTRAL_LARGE, MISTRAL_MEDIUM, MISTRAL_SMALL];
   let lastErr = null;
-  for (const provider of providers) {
+
+  for (const model of models) {
     try {
-      return await provider({ prompt, temperature });
+      return await directMistral({ prompt, temperature, model });
     } catch (err) {
-      console.warn(`AI provider in main process failed:`, err.message);
+      console.warn(`[Main AI] Mistral model ${model} failed, trying next... Error: ${err.message}`);
       lastErr = err;
     }
   }
-  throw lastErr || new Error('All AI providers failed');
+
+  console.error(`[Main AI] All Mistral models failed. Last error:`, lastErr?.message);
+  throw lastErr || new Error('All AI models failed');
 }
 
 function parseGeneratedCourse(text) {
@@ -123,10 +108,10 @@ Give a direct, helpful answer.`;
 }
 
 function setupApiHandlers() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const service = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const apiKey = process.env.LIVEKIT_API_KEY;
-  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://iqzhyvggnulolrwpdfxr.supabase.co/";
+  const service = process.env.SUPABASE_SERVICE_ROLE_KEY || "sb_secret_OC4ElD0yH6L_0IKBhu1FDQ_JGILMttX";
+  const apiKey = process.env.LIVEKIT_API_KEY || "API6zuaqR9x9qsy";
+  const apiSecret = process.env.LIVEKIT_API_SECRET || "rrpfq2syly3TFAUmqyBObH5nwspf5KQTKdndDbNSnJJ";
 
   const adminClient = () => createClient(url, service, { auth: { persistSession: false } });
 
@@ -275,13 +260,12 @@ function setupApiHandlers() {
     }
   });
 
-  ipcMain.handle('api:ai-course', async (event, { moduleName, request, provider }) => {
+  ipcMain.handle('api:ai-course', async (event, { moduleName, request }) => {
     try {
       if (!request?.trim()) throw new Error('Describe the course to generate');
       const text = await callAi({
         prompt: courseGenerationPrompt({ moduleName, request }),
         temperature: 0.5,
-        provider,
       });
       return { ok: true, course: parseGeneratedCourse(text), raw: text };
     } catch (e) {
@@ -289,13 +273,12 @@ function setupApiHandlers() {
     }
   });
 
-  ipcMain.handle('api:ai-course-chat', async (event, { mode = 'chat', question = '', course, provider }) => {
+  ipcMain.handle('api:ai-course-chat', async (event, { mode = 'chat', question = '', course }) => {
     try {
       if (mode !== 'summary' && !question.trim()) throw new Error('Ask a question first');
       const answer = await callAi({
         prompt: courseChatPrompt({ mode, question, course }),
         temperature: 0.3,
-        provider,
       });
       return { ok: true, answer };
     } catch (e) {

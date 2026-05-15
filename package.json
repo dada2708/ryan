@@ -42,7 +42,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@livekit/components-react": "^2.10.7",
+    "@livekit/components-react": "^3.0.0",
     "@supabase/supabase-js": "^2.49.4",
     "livekit-client": "^2.10.1",
     "livekit-server-sdk": "^2.13.0"
